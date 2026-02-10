@@ -29,8 +29,6 @@ class FilesCleaning():
         self.X_test = None
         self.y_test = None
         self.pipe = None
-        
-        
 
     def doc_analysis(self):
 
@@ -299,10 +297,8 @@ class FilesCleaning():
         # plt.legend()
         plt.savefig(f"Graph/Courbe_{graph}_précision_rappel.png", dpi=500, bbox_inches="tight")
         plt.close()
-
         target_recall = 0.90
         min_precision = 0.40
-
         # seuil precision supérieur à 0.40
         valid = precision[:-1] >= min_precision
 
@@ -360,7 +356,7 @@ class FilesCleaning():
         g.set_axis_labels("Probabilité prédite de départ", "Densité")
         g.fig.suptitle("Distribution des probabilités par type de prédiction", y=0.98)
         plt.savefig(f"Graph/Proba_{graph}.png", dpi=500, bbox_inches="tight")
-        plt.show()
+        # plt.show()
 
     
     def classification_test(self):
@@ -372,17 +368,14 @@ class FilesCleaning():
             (self.df["augementation_salaire_precedente"] < 12)
         ).astype(int)
 
-        self.classification_models(200, "feat_cweight", ["carriere_stagnante"], class_weight={0:1, 1:2})
-
         self.classification_models(200,"feat_cweight_resample", ["carriere_stagnante"], class_weight={0:1, 1:2}, resample=True) 
+
+        self.classification_models(200, "feat_cweight", ["carriere_stagnante"], class_weight={0:1, 1:2})
     
     def features_results(self, pipe, X_train, X_test, y_train, y_test):
 
         model = pipe.named_steps["model"]
-
-        # récupération des données transformées
-        X_train_transformed = pipe.named_steps["preprocessing"].transform(X_train)
-        X_test_transformed  = pipe.named_steps["preprocessing"].transform(X_test)
+        # features encodées
         feature_names = pipe.named_steps["preprocessing"].get_feature_names_out()
         fi_native = pd.Series(model.feature_importances_,index=feature_names).sort_values(ascending=False)
         print("\n--- Feature importance native (arbre)")
@@ -400,6 +393,24 @@ class FilesCleaning():
         fi_perm = pd.Series(perm.importances_mean, index=X_test.columns).sort_values(ascending=False)
         print("\n--- Permutation Importance")
         print(fi_perm.head(10))
+        # Récupération des données transformées
+        X_train_transformed = pipe.named_steps["preprocessing"].transform(X_train)
+        X_test_transformed  = pipe.named_steps["preprocessing"].transform(X_test)
+        best_features = fi_perm.head(5).index.tolist()
+        # Ne garder que les colonnes encodées des top 5 features
+        X_train_shap = pd.DataFrame(X_train_transformed, columns=feature_names, index=X_train.index)
+        explainer = shap.TreeExplainer(model, X_train_shap, approximate=True)
+        shap_values_train = explainer.shap_values(X_train_shap, check_additivity=False)
+        shap_values_pos = shap_values_train[1]
+        shap.summary_plot(
+            shap_values_pos,
+            X_train_shap,
+            plot_type="dot",
+            max_display=5
+        )
+        X_test_shap  = pd.DataFrame(X_test_transformed, columns=feature_names, index=X_test.index)
+        shap_values_test = explainer(X_test_shap)
+        shap.plots.waterfall(shap_values_train[0])
 
     def run_script(self):
 
