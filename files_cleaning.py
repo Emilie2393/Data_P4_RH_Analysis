@@ -5,12 +5,15 @@ import numpy as np
 import os
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
-from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, cross_validate
 from sklearn.metrics import confusion_matrix, classification_report, precision_score, recall_score, precision_recall_curve
+from imblearn.pipeline import Pipeline
+from imblearn.over_sampling import SMOTE
+from sklearn.inspection import permutation_importance
+import shap
 
 class FilesCleaning():
 
@@ -21,6 +24,11 @@ class FilesCleaning():
         self.df = None
         self.y = None
         self.preprocess = None
+        self.X_train = None
+        self.y_train = None
+        self.X_test = None
+        self.y_test = None
+        self.pipe = None
         
         
 
@@ -134,6 +142,7 @@ class FilesCleaning():
             plt.ylabel(f"{name}")
             plt.xticks(rotation=10)
             plt.savefig(f"{output_dir}/{name}_boxplot.png", dpi=500, bbox_inches="tight")
+            plt.close()
     
     def data_cleaning(self):
 
@@ -224,10 +233,9 @@ class FilesCleaning():
         for name, model in models.items():
             evaluate_model(name, model, X_train, y_train, X_test, y_test)
         
-    def classification_models(self, n_estimators, class_weight=None):
+    def classification_models(self, n_estimators, graph, new_features=None, class_weight=None, resample=False):
 
-
-        X_train, X_test, y_train, y_test = train_test_split(
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             self.X,
             self.y,
             test_size=0.2,
@@ -235,13 +243,22 @@ class FilesCleaning():
             stratify=self.y
         )
 
+        X_train, X_test, y_train, y_test = self.X_train, self.X_test, self.y_train, self.y_test
+
         scoring = {
                     "precision": "precision",
                     "recall": "recall",
                     "f1": "f1"
                 }
  
-        pipe = Pipeline([
+        if resample:
+            pipe = Pipeline([
+                        ("preprocessing", self.preprocess),
+                        ("resample", SMOTE(sampling_strategy=0.6, random_state=42)),
+                        ("model", RandomForestClassifier(n_estimators=n_estimators, class_weight=class_weight, max_features='sqrt', random_state=42))
+                    ])
+        else:
+            pipe = Pipeline([
                     ("preprocessing", self.preprocess),
                     ("model", RandomForestClassifier(n_estimators=n_estimators, class_weight=class_weight, max_features='sqrt', random_state=42))
                 ])
@@ -252,120 +269,148 @@ class FilesCleaning():
                     y=y_train,
                     cv=5,
                     scoring=scoring,
-                    return_train_score=True
+                    return_train_score=True,
+                    error_score="raise"
                 )
 
-        metrics = ["precision", "recall", "f1"]
-        types = ["train", "test"]
+        # Résultats de la cv
+        train_scores = {k: v for k, v in cv_results.items() if "train" in k}
+        test_scores  = {k: v for k, v in cv_results.items() if "test" in k}
 
-        rows = []
-        for metric in metrics:
-            for t in types:
-                values = cv_results[f"{t}_{metric}"]
-                rows.append({
-                    "metric": metric,
-                    "type": t,
-                    "mean": values.mean(),
-                    "std": values.std()
-                })
+        print("\n---- Train initial")
+        for k, v in train_scores.items():
+            print(f"{k}: {v.mean():.3f} écart-type {v.std():.3f}")
 
-        df_summary = pd.DataFrame(rows)
-        print(df_summary)
+        print("\n---- Test initial")
+        for k, v in test_scores.items():
+            print(f"{k}: {v.mean():.3f} écart-type {v.std():.3f}")
 
-        # Courbe précision - rappel pour déterminer le bon seuil
         pipe.fit(X_train, y_train)
-        y_proba = pipe.predict_proba(X_test)[:, 1]
-        precision, recall, thresholds = precision_recall_curve(y_test, y_proba)
-        plt.figure(figsize=(8, 6))
-        plt.plot(recall, precision, marker='.')
-        plt.xlabel("Recall - taux de réussite total de prédiction")
-        plt.ylabel("Precision - taux de réalité des prédictions positives")
-        plt.title("Courbe Précision–Recall")
+        self.pipe = pipe
+        y_test_proba = pipe.predict_proba(X_test)[:, 1]
+        precision, recall, thresholds = precision_recall_curve(y_test, y_test_proba)
+        # Tracé
+        plt.figure(figsize=(8,6))
+        plt.plot(recall, precision, marker='.', label="Précision-Rappel")
+        plt.xlabel("Rappel (part des départs correctement détectés)")
+        plt.ylabel("Précision (part des alertes réellement fondées)")
+        plt.title("Courbe Précision-Rappel")
         plt.grid(True)
-        plt.show()
+        # plt.legend()
+        plt.savefig(f"Graph/Courbe_{graph}_précision_rappel.png", dpi=500, bbox_inches="tight")
+        plt.close()
 
-        target_recall = 0.80
+        target_recall = 0.90
         min_precision = 0.40
 
+        # seuil precision supérieur à 0.40
         valid = precision[:-1] >= min_precision
 
         if valid.sum() == 0:
             raise ValueError("Aucun seuil ne respecte la précision minimale")
 
+        # récupère les seuils valides
         filtered_recalls = recall[:-1][valid]
         filtered_thresholds = thresholds[valid]
-
+        # récupère le rappel le plus proche de ma target_recall
         idx = np.argmin(np.abs(filtered_recalls - target_recall))
+        # impute ce seuil à ma variable
         threshold = filtered_thresholds[idx]
 
-        print(f"Seuil choisi : {threshold:.3f}")
-        print(f"Recall obtenu : {filtered_recalls[idx]:.3f}")
-        print(f"Precision associée : {precision[:-1][valid][idx]:.3f}")
+        if new_features:
+            print("---- Features ajoutés:\n", new_features)
 
-        y_pred = (y_proba >= threshold).astype(int)
+        print(f"\nSeuil choisi : {threshold:.3f}")
+        print(f"Recall obtenu avec ce seuil : {filtered_recalls[idx]:.3f}")
+        print(f"Precision associée avec ce seuil : {precision[:-1][valid][idx]:.3f}")
 
-        df_plot = pd.DataFrame({
+        # prédiction finale du modèle en fonction du seuil appliqué
+        y_pred = (y_test_proba >= threshold).astype(int)
+        # Df des valeurs y comparées aux prédictions et probabilités associées
+        df_decision = pd.DataFrame({
             "y_true": y_test.values,
-            "y_proba": y_proba,
-            "y_pred": y_pred
+            "y_pred": y_pred,
+            "y_proba": y_test_proba
         })
 
-        def prediction_type(row):
-            if row.y_true == 1 and row.y_pred == 1:
-                return "True Positive"
-            elif row.y_true == 0 and row.y_pred == 1:
-                return "False Positive"
-            elif row.y_true == 0 and row.y_pred == 0:
-                return "True Negative"
-            else:
-                return "False Negative"
-
-        df_plot["prediction_type"] = df_plot.apply(prediction_type, axis=1)
+        df_decision["prediction_type"] = np.select(
+            [
+                (df_decision.y_true == 1) & (df_decision.y_pred == 1),
+                (df_decision.y_true == 0) & (df_decision.y_pred == 1),
+                (df_decision.y_true == 0) & (df_decision.y_pred == 0),
+                (df_decision.y_true == 1) & (df_decision.y_pred == 0),
+            ],
+            ["True Positive", "False Positive", "True Negative", "False Negative"],
+            default="Unknown"
+        )
+        print(df_decision["prediction_type"].value_counts(dropna=False))
 
         g = sns.displot(
-            data=df_plot,
+            data=df_decision,
             x="y_proba",
             hue="prediction_type",
             kind="kde",
+            fill=True,
+            alpha=0.4,
             common_norm=False
-        )
-        g.set_axis_labels(
-            "Probabilité estimée de départ du salarié",
-            "Proportion de salariés"
         )
 
         for ax in g.axes.flat:
             ax.axvline(threshold, color="black", linestyle="--")
-
-        g.fig.suptitle("Densité des probabilités par type de prédiction", y=1.02)
-
+        g.set_axis_labels("Probabilité prédite de départ", "Densité")
+        g.fig.suptitle("Distribution des probabilités par type de prédiction", y=0.98)
+        plt.savefig(f"Graph/Proba_{graph}.png", dpi=500, bbox_inches="tight")
         plt.show()
+
     
     def classification_test(self):
 
-        self.classification_models(200)
+        self.classification_models(200, "sansfeature")
 
-        # self.X["ratio_distance_salaire"] = self.df["distance_domicile_travail"].astype(float) / self.df["revenu_mensuel"].astype(float)
-        self.X["degradation_satisfaction"] = (
-            self.df["note_evaluation_precedente"] - self.df["note_evaluation_actuelle"]
-        ).clip(lower=0)
+        self.X["carriere_stagnante"] = (
+            (self.df["annees_depuis_la_derniere_promotion"] >= 3) &
+            (self.df["augementation_salaire_precedente"] < 12)
+        ).astype(int)
 
-        self.X["amelioration_satisfaction"] = (
-            self.df["note_evaluation_actuelle"] - self.df["note_evaluation_precedente"]
-        ).clip(lower=0)
+        self.classification_models(200, "feat_cweight", ["carriere_stagnante"], class_weight={0:1, 1:2})
 
-        self.classification_models(200)
+        self.classification_models(200,"feat_cweight_resample", ["carriere_stagnante"], class_weight={0:1, 1:2}, resample=True) 
+    
+    def features_results(self, pipe, X_train, X_test, y_train, y_test):
+
+        model = pipe.named_steps["model"]
+
+        # récupération des données transformées
+        X_train_transformed = pipe.named_steps["preprocessing"].transform(X_train)
+        X_test_transformed  = pipe.named_steps["preprocessing"].transform(X_test)
+        feature_names = pipe.named_steps["preprocessing"].get_feature_names_out()
+        fi_native = pd.Series(model.feature_importances_,index=feature_names).sort_values(ascending=False)
+        print("\n--- Feature importance native (arbre)")
+        print(fi_native.head(10))
+
+        perm = permutation_importance(
+            pipe,
+            X_test,
+            y_test,
+            n_repeats=20,
+            random_state=42,
+            scoring="recall"
+        )
+
+        fi_perm = pd.Series(perm.importances_mean, index=X_test.columns).sort_values(ascending=False)
+        print("\n--- Permutation Importance")
+        print(fi_perm.head(10))
+
+    def run_script(self):
+
+        self.doc_analysis()
+        self.data_cleaning()
+        self.first_modelisation()
+        self.classification_test()
+        self.features_results(self.pipe, self.X_train, self.X_test, self.y_train, self.y_test)
 
 
+RH_prediction_analysis = FilesCleaning()
+RH_prediction_analysis.run_script()
 
 
-
-
-
-
-run = FilesCleaning()
-run.doc_analysis()
-run.data_cleaning()
-run.first_modelisation()
-run.classification_test()
-        
