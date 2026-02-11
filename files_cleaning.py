@@ -396,21 +396,21 @@ class FilesCleaning():
         # Récupération des données transformées
         X_train_transformed = pipe.named_steps["preprocessing"].transform(X_train)
         X_test_transformed  = pipe.named_steps["preprocessing"].transform(X_test)
-        best_features = fi_perm.head(5).index.tolist()
         # Ne garder que les colonnes encodées des top 5 features
         X_train_shap = pd.DataFrame(X_train_transformed, columns=feature_names, index=X_train.index)
-        explainer = shap.TreeExplainer(model, X_train_shap, approximate=True)
-        shap_values_train = explainer.shap_values(X_train_shap, check_additivity=False)
-        shap_values_pos = shap_values_train[1]
+        explainer = shap.TreeExplainer(model, X_train_shap)
+        shap_values_train = explainer(X_train_shap, approximate=True)
+        shap_values_pos = shap_values_train[:, :, 1]
+
+        # Plot
         shap.summary_plot(
             shap_values_pos,
             X_train_shap,
-            plot_type="dot",
             max_display=5
         )
-        X_test_shap  = pd.DataFrame(X_test_transformed, columns=feature_names, index=X_test.index)
-        shap_values_test = explainer(X_test_shap)
-        shap.plots.waterfall(shap_values_train[0])
+        # X_test_shap  = pd.DataFrame(X_test_transformed, columns=feature_names, index=X_test.index)
+        # shap_values_test = explainer(X_test_shap)
+        # shap.plots.waterfall(shap_values_train[0])
 
     def run_script(self):
 
