@@ -93,8 +93,6 @@ class FilesCleaning():
 
         for name, feature in features.items():
             df_long = self.departs.melt(value_vars=feature, var_name="feature", value_name=name)
-            print(df_long.head(20))
-
             fig, ax = plt.subplots(figsize=(12, 8))
             sns.boxplot(data=df_long, x="feature", y=name, ax=ax)
             ax.set_title(f"Distribution des {name} – employés ayant quitté l'entreprise")
@@ -524,9 +522,3 @@ class FilesCleaning():
         self.first_modelisation(datasets[0], datasets[1])
         pipe = self.classification_test()
         self.features_results(pipe, self.X_test, self.y_test)
-
-
-RH_prediction_analysis = FilesCleaning()
-RH_prediction_analysis.run_script()
-
-
