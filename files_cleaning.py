@@ -5,10 +5,12 @@ import numpy as np
 import os
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.model_selection import GridSearchCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, cross_validate
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import confusion_matrix, classification_report, precision_score, recall_score, precision_recall_curve
 from imblearn.pipeline import Pipeline
 from imblearn.over_sampling import SMOTE
@@ -195,22 +197,51 @@ class FilesCleaning():
             random_state=42,
         )
 
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
         models = {
             'Dummy': Pipeline([('preprocess', self.preprocess),
-                               ('model', DummyClassifier(strategy='most_frequent', random_state=42))]),
+                            ('model', DummyClassifier(random_state=42))]),
             'Logistic': Pipeline([('preprocess', self.preprocess),
-                                  ('model', LogisticRegression(max_iter=1000, random_state=42))]),
+                                ('model', LogisticRegression(max_iter=1000, random_state=42))]),
             'RandomForest': Pipeline([('preprocess', self.preprocess),
-                                      ('model', RandomForestClassifier(n_estimators=200, max_features='sqrt', random_state=42))])
+                                    ('model', RandomForestClassifier(max_features="sqrt", random_state=42))])
+        }
+
+        param_grids = {
+            'Dummy': {
+                'model__strategy': ['most_frequent']
+            },
+            'Logistic': {
+                'model__C': [0.01, 0.1, 1],
+                'model__solver': ['lbfgs', 'liblinear', 'saga'],
+                'model__class_weight': [None, 'balanced']
+            },
+            'RandomForest': {
+                "model__n_estimators": [200, 300, 400],
+                "model__max_depth": [None, 10, 15],
+                "model__min_samples_leaf": [1, 2, 4]
+            }
         }
 
         def evaluate_model(name, model, X_train, y_train, X_test, y_test):
             print(f"\n=== Modèle : {name} ===")
             # Entrainement du modèle
-            model.fit(X_train, y_train)
+            grid_search = GridSearchCV(
+                estimator=model,
+                param_grid=param_grids[name],
+                scoring='recall',
+                cv=cv,
+                n_jobs=-1,
+                refit=True
+            )
+            grid_search.fit(X_train, y_train)
+            print(f"Meilleurs paramètres : {grid_search.best_params_}")
+            print(f"Meilleur score CV    : {grid_search.best_score_:.3f}")
+            best_model = grid_search.best_estimator_
             # Prediction de l'entrainement
-            y_train_pred = model.predict(X_train)
-            y_test_pred = model.predict(X_test)
+            y_train_pred = best_model.predict(X_train)
+            y_test_pred = best_model.predict(X_test)
             # Pour chaque jeu train/test y_true pour jeu train, y_pred pour jeu test
             for dataset, y_true, y_pred in [('Train', y_train, y_train_pred),
                                             ('Test', y_test, y_test_pred)]:
@@ -231,15 +262,15 @@ class FilesCleaning():
         for name, model in models.items():
             evaluate_model(name, model, X_train, y_train, X_test, y_test)
         
-    def classification_models(self, n_estimators, graph, class_weight=None, resample=False):
+    def classification_models(self, graph, class_weight=None, resample=False):
         """
         Entraîne un RandomForest, sélectionne le seuil optimal (recall≥0.90, precision≥0.40)
         et génère les courbes précision-rappel et distributions de probabilités.
 
         Args:
-            n_estimators : nombre d'arbres | graph : suffixe des PNG
+            graph : suffixe des PNG
             class_weight : pondération des classes | resample : active SMOTE si True
-        
+
         Side effects:
             Modifie self.X_train, self.X_test, self.y_train, self.y_test
             Crée Graph/Courbe_{graph}_précision_rappel.png | Crée Graph/Proba_{graph}.png
@@ -257,43 +288,49 @@ class FilesCleaning():
         )
 
         X_train, X_test, y_train, y_test = self.X_train, self.X_test, self.y_train, self.y_test
-        scoring = {
-                    "precision": "precision",
-                    "recall": "recall",
-                    "f1": "f1"
-                }
+
         if resample:
             pipe = Pipeline([
                         ("preprocessing", self.preprocess),
                         ("resample", SMOTE(sampling_strategy=0.6, random_state=42)),
-                        ("model", RandomForestClassifier(n_estimators=n_estimators, class_weight=class_weight, max_features='sqrt', random_state=42))
+                        ("model", RandomForestClassifier(class_weight=class_weight, max_features="sqrt", random_state=42))
                     ])
         else:
             pipe = Pipeline([
                     ("preprocessing", self.preprocess),
-                    ("model", RandomForestClassifier(n_estimators=n_estimators, class_weight=class_weight, max_features='sqrt', random_state=42))
+                    ("model", RandomForestClassifier(class_weight=class_weight, max_features="sqrt", random_state=42))
                 ])
 
-        cv_results = cross_validate(
-                    estimator=pipe,
-                    X=X_train,
-                    y=y_train,
-                    cv=5,
-                    scoring=scoring,
-                    return_train_score=True,
-                    error_score="raise"
-                )
-        # Résultats de la cv
-        train_scores = {k: v for k, v in cv_results.items() if "train" in k}
-        test_scores  = {k: v for k, v in cv_results.items() if "test" in k}
-        print("\n---- Train initial")
-        for k, v in train_scores.items():
-            print(f"{k}: {v.mean():.3f} écart-type {v.std():.3f}")
-        print("\n---- Test initial")
-        for k, v in test_scores.items():
-            print(f"{k}: {v.mean():.3f} écart-type {v.std():.3f}")
-        # Entrainement et init des variables
-        pipe.fit(X_train, y_train)
+        param_grid = {
+            "model__n_estimators": [200, 300, 400],
+            "model__max_depth": [None, 10, 15],
+            "model__min_samples_leaf": [1, 2, 4]
+        }
+
+        scoring = {
+            "recall": "recall",
+            "precision": "precision",
+            "f1": "f1"
+        }
+
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        grid = GridSearchCV(
+            estimator=pipe,
+            param_grid=param_grid,
+            scoring=scoring,
+            refit="recall",
+            cv=cv,
+            n_jobs=-1,
+            verbose=1
+        )
+        grid.fit(X_train, y_train)
+        pipe = grid.best_estimator_
+        print("\nMeilleurs paramètres :\n", grid.best_params_)
+        print("\nScores CV moyens du meilleur modèle :")
+        print("Recall CV :", grid.cv_results_["mean_test_recall"][grid.best_index_])
+        print("Precision CV :", grid.cv_results_["mean_test_precision"][grid.best_index_])
+        print("F1 CV :", grid.cv_results_["mean_test_f1"][grid.best_index_])
         y_test_proba = pipe.predict_proba(X_test)[:, 1]
         precision, recall, thresholds = precision_recall_curve(y_test, y_test_proba)
         # Tracé
@@ -370,19 +407,18 @@ class FilesCleaning():
             Pipeline de la configuration finale (class_weight + SMOTE).
         """
 
-        self.classification_models(200, "sansfeature")
+        self.classification_models("sansfeature")
 
         self.X["carriere_stagnante"] = (
             (self.df["annees_depuis_la_derniere_promotion"] >= 3) &
             (self.df["augementation_salaire_precedente"] < 12)
         ).astype(int)
 
-        self.classification_models(400, "newfeature_cweight", class_weight={0:1, 1:2})
+        self.classification_models("newfeature_cweight_resample", class_weight={0:1, 1:2}, resample=True) 
 
-        selected_pipe = self.classification_models(400, "newfeature_cweight_resample", class_weight={0:1, 1:2}, resample=True) 
-        
+        selected_pipe = self.classification_models("newfeature_cweight", class_weight={0:1, 1:2})
         return selected_pipe
-    
+
     def features_results(self, pipe, X_test, y_test):
         """
         Analyse l'importance des features via importance native, permutation (recall) et SHAP (probabilité).
@@ -432,10 +468,15 @@ class FilesCleaning():
         print(importances.head(10))
         # Conversion en DataFrame pour conserver les noms de colonnes
         X_test_shap = pd.DataFrame(X_test_transformed, columns=feature_names, index=X_test.index)
+        # Moyenne de chaque feature sur la population de référence
+        references = X_test_shap.mean()
+        print("\nRéférence de chaque feature SHAP:\n", references)
         explainer = shap.TreeExplainer(
             model,
             data=X_test_shap,
+            # mesure l'impact réel de chaque variable indépendamment des corrélations entre elles
             feature_perturbation="interventional",
+            # les SHAP values sont exprimées en contribution sur la probabilité (entre 0 et 1)
             model_output="probability"
         )
         # Calcul des SHAP values sur le set test, classes positives
@@ -507,7 +548,7 @@ class FilesCleaning():
 
         fig, axes = plt.subplots(1, 5, figsize=(20, 7))
 
-        for ax, col in zip(axes, ['heure_supplementaires', 'nombre_participation_pee', 'age', 'annees_dans_l_entreprise', 'satisfaction_employee_nature_travail']):
+        for ax, col in zip(axes, ['heure_supplementaires', 'revenu_mensuel', 'age', 'nombre_participation_pee', 'annees_dans_l_entreprise']):
             sns.boxplot(data=self.departs, y=col, ax=ax, medianprops=dict(color='red', linewidth=3))
             ax.set_title(col)
         plt.suptitle("Features principales SHAP - Départs")
